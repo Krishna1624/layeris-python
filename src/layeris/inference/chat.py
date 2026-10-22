@@ -93,6 +93,33 @@ class InteractiveChatEngine:
 
         print("[*] Engine ready.")
 
+    def generate(self, prompt: str, max_new_tokens: int = 64) -> str:
+        """Programmatic generation for automated pipelines and benchmarks."""
+        if hasattr(self.tokenizer, "chat_template") and self.tokenizer.chat_template:
+            messages = [{"role": "user", "content": prompt}]
+            prompt_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        else:
+            prompt_text = prompt
+
+        inputs = self.tokenizer(prompt_text, return_tensors="pt").to(self.device)
+        gen_kwargs = dict(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=self.tokenizer.eos_token_id,
+        )
+
+        if self.spec_k > 0:
+            try:
+                out = self.model.generate(**gen_kwargs, prompt_lookup_num_tokens=self.spec_k)
+                return self.tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+            except ValueError:
+                # Fall back to standard generation for stateful models
+                pass
+
+        out = self.model.generate(**gen_kwargs)
+        return self.tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+
     def chat_loop(self):
         """Runs the interactive console chat loop."""
         history = [
@@ -125,7 +152,11 @@ class InteractiveChatEngine:
 
             history.append({"role": "user", "content": augmented_msg})
 
-            prompt_text = self.tokenizer.apply_chat_template(history, tokenize=False, add_generation_prompt=True)
+            if hasattr(self.tokenizer, "chat_template") and self.tokenizer.chat_template:
+                prompt_text = self.tokenizer.apply_chat_template(history, tokenize=False, add_generation_prompt=True)
+            else:
+                prompt_text = "\n".join(f"{m['role']}: {m['content']}" for m in history) + "\nassistant: "
+
             inputs = self.tokenizer(prompt_text, return_tensors="pt").to(self.device)
 
             streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
@@ -137,7 +168,9 @@ class InteractiveChatEngine:
                 pad_token_id=self.tokenizer.eos_token_id,
             )
             if self.spec_k > 0:
-                gen_kwargs["prompt_lookup_num_tokens"] = self.spec_k
+                arch_name = type(self.model).__name__
+                if not any(k in arch_name for k in ["DeltaNet", "Mamba", "RWKV", "Stateful", "Qwen3_5"]):
+                    gen_kwargs["prompt_lookup_num_tokens"] = self.spec_k
 
             thread = Thread(target=self.model.generate, kwargs=gen_kwargs)
             thread.start()
