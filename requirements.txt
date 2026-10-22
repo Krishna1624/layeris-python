@@ -1,0 +1,8 @@
+# Core dependencies for simulation, prefetching, and benchmarking
+numpy>=1.24.0
+psutil>=5.9.0
+
+# Optional dependencies for real neural network speculative inference & chat
+torch>=2.2.0
+transformers>=4.40.0
+accelerate>=0.28.0
