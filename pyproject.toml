@@ -41,3 +41,6 @@ layeris-chat = "layeris.inference.chat:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
