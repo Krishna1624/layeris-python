@@ -157,6 +157,41 @@ Arguments:
 
 ---
 
+## KV-Cache Compression
+
+Layeris delegates model execution and attention to Hugging Face Transformers. With a Transformers release that exposes `CacheLayerMixin` (the tested interface is Transformers 5.x), chat can pass a compressed dynamic cache directly to `model.generate`; this does not install or build a native Colibri engine.
+
+The available setting is opt-in:
+
+```powershell
+# Original-precision cache (the default)
+$env:KV_TQ = "0"
+$env:KV_TQ_POLAR = "0"
+
+# 4-bit TurboQuant scalar cache
+$env:KV_TQ = "4"
+$env:KV_TQ_POLAR = "0"
+python -m layeris.inference.chat --model Qwen/Qwen2.5-0.5B-Instruct
+```
+
+The current prototype stores keys and values in packed 4-bit codes using a randomized Hadamard transform and a Gaussian-approximation Lloyd-Max scalar codebook; vector scales are kept in FP32. This implements the scalar MSE quantization path, not TurboQuant's QJL inner-product residual coding, and should be treated as TurboQuant-style rather than a complete reproduction of every TurboQuant variant. It handles standard full-attention dynamic-cache layers whose head dimension is a power of two and at least 32. The configured Qwen2.5-0.5B model uses GQA with a 64-dimensional head and is covered by the tiny-model integration test. Unsupported cache layouts/dimensions, non-finite inputs, and unsupported Transformers cache APIs retain original-precision tensors. A warning is emitted when the requested mode cannot be applied.
+
+`KV_TQ_POLAR=1` is recognized but 3-bit Polar quantization is not implemented in this release; it logs a warning and uses the original cache. If compression is active, prompt-lookup speculative generation is disabled for that generation call so it cannot replace or bypass the supplied cache.
+
+This path reconstructs the cached tensors for attention on each cache update. It reduces resident KV storage, but adds quantization/dequantization work and is not a fused attention kernel; no inference speedup is promised. Verify activation from the chat output (`TurboQuant-style KV scalar quantization active: 4-bit, ... attention layers.`) and the post-generation counts for compressed and original-precision fallback layers.
+
+Run the automated tests and a synthetic cache microbenchmark with:
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+python -m layeris.inference.kv_cache_benchmark --contexts 512 1024 2048 4096 --device cpu --output results\kv_cache_microbenchmark.json
+layeris-kv-model-benchmark --model Qwen/Qwen2.5-0.5B-Instruct --contexts 512 1024 2048 4096 --max-new-tokens 32 --device cpu --output results\kv_cache_model_benchmark.json
+```
+
+The synthetic microbenchmark reports cache tensor bytes, update timings, and reconstruction error; it is not an end-to-end inference benchmark. The full-model command loads the checkpoint and compares the standard Hugging Face dynamic cache against TurboQuant at each context length, reporting TTFT, decoding latency, tokens/sec, process RSS, cache bytes, and generated-token similarity. For consistent inputs, it repeats the supplied prompt tokens to reach each requested context length. This can be memory-intensive; choose `--device` and context lengths appropriate for the machine. The full-model measurements were not run as part of this change because the development machine has only about 2.4 GB available RAM.
+
+---
+
 ## Running the Test Suite
 
 Run all unit tests across both prefetching and inference components:

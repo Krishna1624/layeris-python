@@ -15,6 +15,12 @@ from layeris.inference.speculative import (
 from layeris.inference.chat import (
     InteractiveChatEngine,
 )
+from layeris.inference.kv_cache import (
+    KVCacheSettings,
+    TurboQuantCache,
+    create_kv_cache,
+    get_kv_cache_settings,
+)
 
 __all__ = [
     "configure_safe_execution_environment",
@@ -24,4 +30,8 @@ __all__ = [
     "PromptLookupDraftGenerator",
     "SpeculativeStats",
     "InteractiveChatEngine",
+    "KVCacheSettings",
+    "TurboQuantCache",
+    "create_kv_cache",
+    "get_kv_cache_settings",
 ]

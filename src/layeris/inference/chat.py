@@ -28,6 +28,7 @@ except ImportError:
     TextIteratorStreamer = None
 
 from layeris.inference.guard import configure_safe_execution_environment
+from layeris.inference.kv_cache import create_kv_cache, get_kv_cache_settings
 
 
 def search_live_web(query: str, timeout: int = 6) -> str:
@@ -73,6 +74,7 @@ class InteractiveChatEngine:
 
         self.model_id = model_id
         self.spec_k = spec_k
+        self.kv_cache_settings = get_kv_cache_settings()
         self.profile = configure_safe_execution_environment()
 
         if device == "auto":
@@ -91,7 +93,30 @@ class InteractiveChatEngine:
         if self.device == "cpu":
             self.model = self.model.to("cpu")
 
+        if self.kv_cache_settings.bits or self.kv_cache_settings.polar:
+            print(
+                f"[*] KV cache request: KV_TQ={self.kv_cache_settings.bits} "
+                f"KV_TQ_POLAR={int(self.kv_cache_settings.polar)}"
+            )
         print("[*] Engine ready.")
+
+    def _new_kv_cache(self):
+        cache = create_kv_cache(self.model.config, self.kv_cache_settings)
+        if cache is not None:
+            print(
+                f"[*] TurboQuant-style KV scalar quantization active: 4-bit, "
+                f"{len(cache.layers)} attention layers."
+            )
+        return cache
+
+    @staticmethod
+    def _report_kv_cache_usage(cache) -> None:
+        if cache is not None:
+            print(
+                "[*] KV cache usage: "
+                f"TurboQuant-compressed layers={cache.compressed_layers}, "
+                f"original-precision fallback layers={cache.fallback_layers}."
+            )
 
     def generate(self, prompt: str, max_new_tokens: int = 64) -> str:
         """Programmatic generation for automated pipelines and benchmarks."""
@@ -108,8 +133,11 @@ class InteractiveChatEngine:
             do_sample=False,
             pad_token_id=self.tokenizer.eos_token_id,
         )
+        kv_cache = self._new_kv_cache()
+        if kv_cache is not None:
+            gen_kwargs["past_key_values"] = kv_cache
 
-        if self.spec_k > 0:
+        if self.spec_k > 0 and kv_cache is None:
             try:
                 out = self.model.generate(**gen_kwargs, prompt_lookup_num_tokens=self.spec_k)
                 return self.tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
@@ -118,6 +146,7 @@ class InteractiveChatEngine:
                 pass
 
         out = self.model.generate(**gen_kwargs)
+        self._report_kv_cache_usage(kv_cache)
         return self.tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
     def chat_loop(self):
@@ -167,7 +196,10 @@ class InteractiveChatEngine:
                 do_sample=False,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
-            if self.spec_k > 0:
+            kv_cache = self._new_kv_cache()
+            if kv_cache is not None:
+                gen_kwargs["past_key_values"] = kv_cache
+            if self.spec_k > 0 and kv_cache is None:
                 arch_name = type(self.model).__name__
                 if not any(k in arch_name for k in ["DeltaNet", "Mamba", "RWKV", "Stateful", "Qwen3_5"]):
                     gen_kwargs["prompt_lookup_num_tokens"] = self.spec_k
@@ -186,6 +218,7 @@ class InteractiveChatEngine:
                 token_count += 1
 
             thread.join()
+            self._report_kv_cache_usage(kv_cache)
             t1 = time.perf_counter()
             duration = max(0.001, t1 - t0)
             tps = token_count / duration

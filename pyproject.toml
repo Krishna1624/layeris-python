@@ -38,6 +38,8 @@ dev = [
 [project.scripts]
 layeris-benchmark = "layeris.prefetch.benchmark:main"
 layeris-chat = "layeris.inference.chat:main"
+layeris-kv-cache-benchmark = "layeris.inference.kv_cache_benchmark:main"
+layeris-kv-model-benchmark = "layeris.inference.kv_cache_model_benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
