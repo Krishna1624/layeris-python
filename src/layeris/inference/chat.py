@@ -9,14 +9,11 @@ from __future__ import annotations
 
 import argparse
 import html
-import os
 import re
-import sys
 import time
 import urllib.parse
 import urllib.request
 from threading import Thread
-from typing import Optional
 
 try:
     import torch
@@ -103,8 +100,13 @@ class InteractiveChatEngine:
     def _new_kv_cache(self):
         cache = create_kv_cache(self.model.config, self.kv_cache_settings)
         if cache is not None:
+            mode = (
+                f"{cache.bits}-bit Polar"
+                if cache.polar
+                else f"{cache.bits}-bit TurboQuant-style scalar"
+            )
             print(
-                f"[*] TurboQuant-style KV scalar quantization active: 4-bit, "
+                f"[*] KV cache compression active: {mode}, "
                 f"{len(cache.layers)} attention layers."
             )
         return cache

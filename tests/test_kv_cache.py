@@ -9,7 +9,10 @@ from unittest.mock import patch
 import torch
 
 from layeris.inference.kv_cache import (
+    KVCacheSettings,
     TurboQuantDynamicLayer,
+    _pack_3bit,
+    _unpack_3bit,
     create_kv_cache,
     get_kv_cache_settings,
 )
@@ -85,6 +88,32 @@ class TestTurboQuantDynamicLayer(unittest.TestCase):
         self.assertEqual(restored.dtype, torch.float16)
         self.assertTrue(torch.equal(restored, zeros))
 
+    def test_three_bit_polar_packs_three_bits_and_preserves_norm(self):
+        layer = TurboQuantDynamicLayer(layer_idx=0, bits=3, polar=True)
+        source = torch.randn(1, 2, 12, 64)
+        restored, _ = layer.update(source, source)
+        self.assertEqual(layer.keys.shape[-1], 24)
+        torch.testing.assert_close(
+            restored.norm(dim=-1), source.norm(dim=-1), rtol=1e-5, atol=1e-5
+        )
+        self.assertTrue(torch.isfinite(restored).all())
+
+    def test_polar_quantization_preserves_zero_vectors(self):
+        layer = TurboQuantDynamicLayer(layer_idx=0, bits=3, polar=True)
+        zeros = torch.zeros(1, 1, 3, 64)
+        restored, _ = layer.update(zeros, zeros)
+        self.assertTrue(torch.equal(restored, zeros))
+
+    def test_rejects_incompatible_bit_and_polar_modes(self):
+        with self.assertRaises(ValueError):
+            TurboQuantDynamicLayer(layer_idx=0, bits=4, polar=True)
+        with self.assertRaises(ValueError):
+            TurboQuantDynamicLayer(layer_idx=0, bits=3, polar=False)
+
+    def test_three_bit_packing_round_trips_all_code_values(self):
+        codes = torch.arange(8, dtype=torch.uint8).repeat(8)
+        self.assertTrue(torch.equal(_unpack_3bit(_pack_3bit(codes), 64), codes))
+
     def test_long_context_remains_finite(self):
         layer = TurboQuantDynamicLayer(layer_idx=1)
         source = torch.randn(1, 2, 512, 64)
@@ -105,6 +134,14 @@ class TestTurboQuantDynamicLayer(unittest.TestCase):
         self.assertTrue(torch.equal(keys[..., :3, :], initial_keys))
         self.assertTrue(torch.equal(values[..., :3, :], initial_values))
         self.assertTrue(torch.isinf(keys[0, 0, 3, 0]))
+
+    def test_finite_but_overflowing_transform_falls_back(self):
+        layer = TurboQuantDynamicLayer(layer_idx=0)
+        large_finite = torch.full((1, 1, 2, 64), 1e38, dtype=torch.float32)
+        cached_keys, cached_values = layer.update(large_finite, large_finite)
+        self.assertIs(layer._key_original, cached_keys)
+        self.assertTrue(torch.equal(cached_keys, large_finite))
+        self.assertTrue(torch.equal(cached_values, large_finite))
 
     def test_batch_reorder_repeat_and_crop(self):
         layer = TurboQuantDynamicLayer(layer_idx=0)
@@ -129,6 +166,35 @@ class TestTurboQuantDynamicLayer(unittest.TestCase):
         self.assertEqual(restored.shape, next_source.shape)
         self.assertIsNone(layer._key_original)
 
+    def test_rejects_invalid_tensor_rank_and_empty_updates(self):
+        layer = TurboQuantDynamicLayer(layer_idx=0)
+        vector = torch.randn(64)
+        with self.assertRaisesRegex(ValueError, "sequence and feature dimensions"):
+            layer.update(vector, vector)
+        empty = torch.empty(1, 2, 0, 64)
+        with self.assertRaisesRegex(ValueError, "at least one token"):
+            layer.update(empty, empty)
+
+    def test_rejects_batch_head_dtype_and_device_changes(self):
+        layer = TurboQuantDynamicLayer(layer_idx=0)
+        source = torch.randn(1, 2, 2, 64)
+        layer.update(source, source)
+
+        with self.subTest("batch size"):
+            other_batch = torch.randn(2, 2, 1, 64)
+            with self.assertRaisesRegex(ValueError, "batch and head dimensions"):
+                layer.update(other_batch, other_batch)
+
+        with self.subTest("head count"):
+            other_heads = torch.randn(1, 3, 1, 64)
+            with self.assertRaisesRegex(ValueError, "batch and head dimensions"):
+                layer.update(other_heads, other_heads)
+
+        with self.subTest("dtype"):
+            other_dtype = source[:, :, :1, :].to(torch.float16)
+            with self.assertRaisesRegex(ValueError, "original dtype and device"):
+                layer.update(other_dtype, other_dtype)
+
 
 class TestTurboQuantConfiguration(unittest.TestCase):
     def test_environment_settings(self):
@@ -143,14 +209,29 @@ class TestTurboQuantConfiguration(unittest.TestCase):
                 get_kv_cache_settings()
 
     def test_polar_request_uses_original_cache(self):
-        settings = get_kv_cache_settings_from_values(bits=0, polar=True)
+        settings = KVCacheSettings(bits=0, polar=True)
         self.assertIsNone(create_kv_cache(config=None, settings=settings))
 
+    def test_polar_request_creates_3bit_cache(self):
+        from transformers import Qwen2Config
 
-def get_kv_cache_settings_from_values(bits: int, polar: bool):
-    from layeris.inference.kv_cache import KVCacheSettings
+        config = Qwen2Config(
+            hidden_size=256,
+            intermediate_size=384,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+        )
+        cache = create_kv_cache(
+            config, settings=KVCacheSettings(bits=0, polar=True)
+        )
+        self.assertIsNotNone(cache)
+        self.assertEqual(cache.bits, 3)
+        self.assertTrue(cache.polar)
 
-    return KVCacheSettings(bits=bits, polar=polar)
+    def test_incompatible_setting_falls_back_to_original_cache(self):
+        settings = KVCacheSettings(bits=4, polar=True)
+        self.assertIsNone(create_kv_cache(config=None, settings=settings))
 
 
 class TestTurboQuantModelIntegration(unittest.TestCase):
@@ -196,6 +277,18 @@ class TestTurboQuantModelIntegration(unittest.TestCase):
         self.assertEqual(turboquant["original_precision_fallback_layers"], 0)
         self.assertIsNotNone(turboquant["time_to_first_token_seconds"])
         self.assertGreater(turboquant["tokens_per_second"], 0)
+
+        polar = _run_generation(
+            model,
+            TokenizerStub(),
+            input_ids[:1],
+            max_new_tokens=3,
+            compressed=True,
+            cache_settings=KVCacheSettings(bits=3, polar=True),
+        )
+        self.assertEqual(polar["cache_mode_used"], "3-bit Polar")
+        self.assertEqual(polar["turboquant_compressed_layers"], 2)
+        self.assertEqual(polar["original_precision_fallback_layers"], 0)
 
 
 if __name__ == "__main__":

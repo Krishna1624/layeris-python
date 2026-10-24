@@ -10,6 +10,7 @@ import psutil
 import time
 from difflib import SequenceMatcher
 from statistics import mean
+from typing import Optional
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -44,8 +45,16 @@ def _tensor_cache_bytes(cache) -> int:
     )
 
 
-def _run_generation(model, tokenizer, input_ids, max_new_tokens: int, compressed: bool) -> dict:
-    cache = create_kv_cache(model.config, KVCacheSettings(bits=4)) if compressed else None
+def _run_generation(
+    model,
+    tokenizer,
+    input_ids,
+    max_new_tokens: int,
+    compressed: bool,
+    cache_settings: Optional[KVCacheSettings] = None,
+) -> dict:
+    cache_settings = cache_settings or KVCacheSettings(bits=4)
+    cache = create_kv_cache(model.config, cache_settings) if compressed else None
     requested_cache_unavailable = compressed and cache is None
     if cache is None:
         cache = DynamicCache(config=model.config)
@@ -84,14 +93,26 @@ def _run_generation(model, tokenizer, input_ids, max_new_tokens: int, compressed
         compressed_layers = 0
         fallback_layers = len(cache.layers) if requested_cache_unavailable else 0
 
+    requested_mode = (
+        f"{cache_settings.bits or (3 if cache_settings.polar else 4)}-bit Polar"
+        if cache_settings.polar
+        else f"{cache_settings.bits}-bit TurboQuant-style scalar"
+    )
+    used_mode = (
+        "original"
+        if not compressed_layers
+        else "mixed with original-precision fallback"
+        if fallback_layers
+        else requested_mode
+    )
     return {
         "generated_token_ids": generated_ids.detach().cpu().tolist(),
         "generated_text": tokenizer.decode(
             generated_ids.detach().cpu(), skip_special_tokens=True
         ),
         "generated_tokens": generated_tokens,
-        "cache_mode_requested": "turboquant_4bit" if compressed else "original",
-        "cache_mode_used": "turboquant" if compressed_layers else "original",
+        "cache_mode_requested": requested_mode if compressed else "original",
+        "cache_mode_used": used_mode,
         "turboquant_cache_unavailable": requested_cache_unavailable,
         "elapsed_seconds": elapsed,
         "time_to_first_token_seconds": first_token_latency,
@@ -123,7 +144,12 @@ def run_benchmark(
     max_new_tokens: int,
     prompt: str,
     device_name: str,
+    bits: int = 4,
+    polar: bool = False,
 ) -> dict:
+    if (bits == 3) != polar:
+        raise ValueError("Use bits=4 with polar=False, or bits=3 with polar=True.")
+    cache_settings = KVCacheSettings(bits=bits, polar=polar)
     device = torch.device(device_name)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested, but PyTorch reports that CUDA is unavailable.")
@@ -151,7 +177,12 @@ def run_benchmark(
             model, tokenizer, input_ids, max_new_tokens, compressed=False
         )
         turboquant = _run_generation(
-            model, tokenizer, input_ids, max_new_tokens, compressed=True
+            model,
+            tokenizer,
+            input_ids,
+            max_new_tokens,
+            compressed=True,
+            cache_settings=cache_settings,
         )
         baseline_ids = original.pop("generated_token_ids")
         compressed_ids = turboquant.pop("generated_token_ids")
@@ -171,6 +202,9 @@ def run_benchmark(
         "device": str(model_device),
         "dtype": str(dtype),
         "max_new_tokens": max_new_tokens,
+        "cache_mode_compared": (
+            "3-bit Polar" if polar else "4-bit TurboQuant-style scalar"
+        ),
         "prompt_repeated_to_requested_context_length": True,
         "process_rss_before_model_load_bytes": rss_before_load,
         "process_rss_after_model_load_bytes": rss_after_load,
@@ -185,10 +219,14 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--prompt", default="Explain the purpose of a key-value cache.")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--bits", type=int, choices=[3, 4], default=4)
+    parser.add_argument("--polar", action="store_true")
     parser.add_argument("--output", default="")
     args = parser.parse_args()
     if args.max_new_tokens < 1:
         parser.error("--max-new-tokens must be positive.")
+    if (args.bits == 3) != args.polar:
+        parser.error("Use --bits 4 without --polar, or --bits 3 with --polar.")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     report = run_benchmark(
@@ -197,6 +235,8 @@ def main() -> None:
         max_new_tokens=args.max_new_tokens,
         prompt=args.prompt,
         device_name=args.device,
+        bits=args.bits,
+        polar=args.polar,
     )
     rendered = json.dumps(report, indent=2)
     if args.output:

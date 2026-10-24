@@ -39,12 +39,16 @@ def run_benchmark(
     head_dim: int,
     device_name: str,
     repetitions: int,
+    bits: int = 4,
+    polar: bool = False,
 ) -> dict:
     device = torch.device(device_name)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested, but PyTorch reports that CUDA is unavailable.")
     if head_dim < 32 or head_dim & (head_dim - 1):
         raise ValueError("head_dim must be a supported power of two >= 32.")
+    if bits not in (3, 4) or (bits == 3) != polar:
+        raise ValueError("Use bits=4 with polar=False, or bits=3 with polar=True.")
 
     process = psutil.Process()
     rss_start = process.memory_info().rss
@@ -67,7 +71,9 @@ def run_benchmark(
         key_mse = value_mse = 0.0
 
         for repeat in range(repetitions):
-            compressed = TurboQuantDynamicLayer(layer_idx=repeat)
+            compressed = TurboQuantDynamicLayer(
+                layer_idx=repeat, bits=bits, polar=polar
+            )
             prefill_times.append(
                 _timed(lambda: compressed.update(key_states, value_states), device)
             )
@@ -121,7 +127,7 @@ def run_benchmark(
             {
                 "context_tokens": context,
                 "original_cache_bytes": original_bytes,
-                "turboquant_cache_bytes": compressed_bytes,
+                "compressed_cache_bytes": compressed_bytes,
                 "storage_reduction_ratio": original_bytes / compressed_bytes,
                 "prefill_update_seconds_mean": mean(prefill_times),
                 "quantization_seconds_mean": mean(quantization_times),
@@ -136,6 +142,7 @@ def run_benchmark(
 
     return {
         "benchmark_kind": "synthetic KV-cache microbenchmark (not full-model inference)",
+        "cache_mode": "3-bit Polar" if polar else "4-bit TurboQuant-style scalar",
         "device": str(device),
         "dtype": "torch.float32",
         "batch_size": batch_size,
@@ -155,12 +162,16 @@ def main() -> None:
     parser.add_argument("--num-heads", type=int, default=2)
     parser.add_argument("--head-dim", type=int, default=64)
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--bits", type=int, choices=[3, 4], default=4)
+    parser.add_argument("--polar", action="store_true")
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--output", type=str, default="")
     args = parser.parse_args()
 
     if args.repetitions < 1:
         parser.error("--repetitions must be positive.")
+    if (args.bits == 3) != args.polar:
+        parser.error("Use --bits 4 without --polar, or --bits 3 with --polar.")
     result = run_benchmark(
         contexts=args.contexts,
         batch_size=args.batch_size,
@@ -168,6 +179,8 @@ def main() -> None:
         head_dim=args.head_dim,
         device_name=args.device,
         repetitions=args.repetitions,
+        bits=args.bits,
+        polar=args.polar,
     )
     rendered = json.dumps(result, indent=2)
     if args.output:

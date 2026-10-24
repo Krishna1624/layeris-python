@@ -172,23 +172,30 @@ $env:KV_TQ_POLAR = "0"
 $env:KV_TQ = "4"
 $env:KV_TQ_POLAR = "0"
 python -m layeris.inference.chat --model Qwen/Qwen2.5-0.5B-Instruct
+
+# 3-bit Polar cache
+$env:KV_TQ = "3"
+$env:KV_TQ_POLAR = "1"
+python -m layeris.inference.chat --model Qwen/Qwen2.5-0.5B-Instruct
 ```
 
-The current prototype stores keys and values in packed 4-bit codes using a randomized Hadamard transform and a Gaussian-approximation Lloyd-Max scalar codebook; vector scales are kept in FP32. This implements the scalar MSE quantization path, not TurboQuant's QJL inner-product residual coding, and should be treated as TurboQuant-style rather than a complete reproduction of every TurboQuant variant. It handles standard full-attention dynamic-cache layers whose head dimension is a power of two and at least 32. The configured Qwen2.5-0.5B model uses GQA with a 64-dimensional head and is covered by the tiny-model integration test. Unsupported cache layouts/dimensions, non-finite inputs, and unsupported Transformers cache APIs retain original-precision tensors. A warning is emitted when the requested mode cannot be applied.
+The 4-bit prototype stores keys and values in packed 4-bit codes using a randomized Hadamard transform and a Gaussian-approximation Lloyd-Max scalar codebook; vector scales are kept in FP32. This implements the scalar MSE quantization path, not TurboQuant's QJL inner-product residual coding, and should be treated as TurboQuant-style rather than a complete reproduction of every TurboQuant variant. The 3-bit Polar mode stores a vector norm and quantizes the rotated direction in packed 3-bit codes. Both modes handle standard full-attention dynamic-cache layers whose head dimension is a power of two and at least 32. `KV_TQ=0` with `KV_TQ_POLAR=1` also selects 3-bit Polar. Incompatible combinations (`KV_TQ=3` with Polar off, or `KV_TQ=4` with Polar on) warn and use the original cache. The configured Qwen2.5-0.5B model uses GQA with a 64-dimensional head and is covered by the tiny-model integration test. Unsupported cache layouts/dimensions, non-finite inputs, and unsupported Transformers cache APIs retain original-precision tensors. A warning is emitted when the requested mode cannot be applied.
 
-`KV_TQ_POLAR=1` is recognized but 3-bit Polar quantization is not implemented in this release; it logs a warning and uses the original cache. If compression is active, prompt-lookup speculative generation is disabled for that generation call so it cannot replace or bypass the supplied cache.
+If compression is active, prompt-lookup speculative generation is disabled for that generation call so it cannot replace or bypass the supplied cache.
 
-This path reconstructs the cached tensors for attention on each cache update. It reduces resident KV storage, but adds quantization/dequantization work and is not a fused attention kernel; no inference speedup is promised. Verify activation from the chat output (`TurboQuant-style KV scalar quantization active: 4-bit, ... attention layers.`) and the post-generation counts for compressed and original-precision fallback layers.
+This path reconstructs the cached tensors for attention on each cache update. It reduces resident KV storage, but adds quantization/dequantization work and is not a fused attention kernel; no inference speedup is promised. Verify activation from the chat output (`KV cache compression active: ...`) and the post-generation counts for compressed and original-precision fallback layers.
 
 Run the automated tests and a synthetic cache microbenchmark with:
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"
-python -m layeris.inference.kv_cache_benchmark --contexts 512 1024 2048 4096 --device cpu --output results\kv_cache_microbenchmark.json
-layeris-kv-model-benchmark --model Qwen/Qwen2.5-0.5B-Instruct --contexts 512 1024 2048 4096 --max-new-tokens 32 --device cpu --output results\kv_cache_model_benchmark.json
+python -m layeris.inference.kv_cache_benchmark --bits 4 --contexts 512 1024 2048 4096 --device cpu --output results\kv_cache_microbenchmark.json
+python -m layeris.inference.kv_cache_benchmark --bits 3 --polar --contexts 512 1024 2048 4096 --device cpu --output results\kv_cache_polar_microbenchmark.json
+layeris-kv-model-benchmark --bits 4 --model Qwen/Qwen2.5-0.5B-Instruct --contexts 512 1024 2048 4096 --max-new-tokens 32 --device cpu --output results\kv_cache_model_benchmark.json
+layeris-kv-model-benchmark --bits 3 --polar --model Qwen/Qwen2.5-0.5B-Instruct --contexts 512 1024 2048 4096 --max-new-tokens 32 --device cpu --output results\kv_cache_polar_model_benchmark.json
 ```
 
-The synthetic microbenchmark reports cache tensor bytes, update timings, and reconstruction error; it is not an end-to-end inference benchmark. The full-model command loads the checkpoint and compares the standard Hugging Face dynamic cache against TurboQuant at each context length, reporting TTFT, decoding latency, tokens/sec, process RSS, cache bytes, and generated-token similarity. For consistent inputs, it repeats the supplied prompt tokens to reach each requested context length. This can be memory-intensive; choose `--device` and context lengths appropriate for the machine. The full-model measurements were not run as part of this change because the development machine has only about 2.4 GB available RAM.
+The synthetic microbenchmark reports cache tensor bytes, update timings, and reconstruction error; it is not an end-to-end inference benchmark. The full-model command loads the checkpoint and compares the standard Hugging Face dynamic cache against the selected 4-bit scalar or 3-bit Polar mode at each context length, reporting TTFT, decoding latency, tokens/sec, process RSS, cache bytes, and generated-token similarity. For consistent inputs, it repeats the supplied prompt tokens to reach each requested context length. This can be memory-intensive; choose `--device` and context lengths appropriate for the machine. The full-model measurements were not run as part of this change because the development machine has only about 2.4 GB available RAM.
 
 ---
 
@@ -204,9 +211,9 @@ Expected output:
 ```text
 .............
 ----------------------------------------------------------------------
-Ran 13 tests in 0.045s
+Ran 44 tests in 1.2s
 
-OK
+OK (skipped=5)
 ```
 
 ---
