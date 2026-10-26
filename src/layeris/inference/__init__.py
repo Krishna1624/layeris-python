@@ -11,6 +11,9 @@ from layeris.inference.speculative import (
     SpeculativeDecoder,
     PromptLookupDraftGenerator,
     SpeculativeStats,
+    TwoModelSpeculativeEngine,
+    verify_candidates,
+    make_model_verifier,
 )
 from layeris.inference.chat import (
     InteractiveChatEngine,
@@ -29,6 +32,9 @@ __all__ = [
     "SpeculativeDecoder",
     "PromptLookupDraftGenerator",
     "SpeculativeStats",
+    "TwoModelSpeculativeEngine",
+    "verify_candidates",
+    "make_model_verifier",
     "InteractiveChatEngine",
     "KVCacheSettings",
     "TurboQuantCache",

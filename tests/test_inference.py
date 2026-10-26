@@ -60,6 +60,113 @@ class TestInferenceComponents(unittest.TestCase):
         self.assertEqual(stats.acceptance_rate, 0.75)
         self.assertEqual(stats.tokens_per_second, 10.0)
 
+        stats.reset()
+        self.assertEqual(stats.total_tokens_generated, 0)
+        self.assertEqual(stats.total_forward_passes, 0)
+        self.assertEqual(stats.total_draft_tokens, 0)
+        self.assertEqual(stats.accepted_draft_tokens, 0)
+
+    def test_candidate_verification_full_acceptance(self):
+        # Target sequence after [1, 2]: [3, 4, 5, 6]
+        def mock_predict(prefix):
+            target_seq = [1, 2, 3, 4, 5, 6, 7]
+            idx = len(prefix)
+            return target_seq[idx] if idx < len(target_seq) else 99
+
+        prompt = [1, 2]
+        drafts = [3, 4, 5]
+        from layeris.inference.speculative import verify_candidates, SpeculativeDecoder
+
+        accepted, bonus, is_eos = verify_candidates(mock_predict, prompt, drafts, eos_token_id=99)
+        self.assertEqual(accepted, [3, 4, 5])
+        self.assertEqual(bonus, 6)
+        self.assertFalse(is_eos)
+
+    def test_candidate_verification_partial_acceptance(self):
+        # Target sequence: [1, 2, 3, 4, 999] (mismatch at index 4)
+        def mock_predict(prefix):
+            mapping = {
+                (1, 2): 3,
+                (1, 2, 3): 4,
+                (1, 2, 3, 4): 999,
+            }
+            return mapping.get(tuple(prefix), 0)
+
+        prompt = [1, 2]
+        drafts = [3, 4, 888] # 3 and 4 match, 888 mismatches
+        from layeris.inference.speculative import verify_candidates
+
+        accepted, correction, is_eos = verify_candidates(mock_predict, prompt, drafts)
+        self.assertEqual(accepted, [3, 4])
+        self.assertEqual(correction, 999) # Emits target model's correction token
+        self.assertFalse(is_eos)
+
+    def test_candidate_verification_zero_acceptance(self):
+        # Target sequence: [1, 2, 999]
+        def mock_predict(prefix):
+            return 999
+
+        prompt = [1, 2]
+        drafts = [100, 101, 102] # All mismatch
+        from layeris.inference.speculative import verify_candidates
+
+        accepted, correction, is_eos = verify_candidates(mock_predict, prompt, drafts)
+        self.assertEqual(accepted, [])
+        self.assertEqual(correction, 999)
+        self.assertFalse(is_eos)
+
+    def test_candidate_verification_eos_handling(self):
+        EOS = 1000
+        # Target generates [3, EOS]
+        def mock_predict(prefix):
+            if prefix == [1, 2]:
+                return 3
+            if prefix == [1, 2, 3]:
+                return EOS
+            return 0
+
+        from layeris.inference.speculative import verify_candidates
+        # Case A: EOS in draft tokens
+        accepted, next_tok, is_eos = verify_candidates(mock_predict, [1, 2], [3, EOS], eos_token_id=EOS)
+        self.assertEqual(accepted, [3, EOS])
+        self.assertIsNone(next_tok)
+        self.assertTrue(is_eos)
+
+        # Case B: EOS in correction token
+        accepted, next_tok, is_eos = verify_candidates(mock_predict, [1, 2], [3, 4], eos_token_id=EOS)
+        self.assertEqual(accepted, [3])
+        self.assertEqual(next_tok, EOS)
+        self.assertTrue(is_eos)
+
+    def test_speculative_decoder_full_generation_and_fallback(self):
+        from layeris.inference.speculative import SpeculativeDecoder, verify_candidates
+
+        # Target generates repeated pattern: [10, 20, 30, 40, 10, 20, 30, 40, 10, 20]
+        ground_truth = [10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40]
+        def target_predict(prefix):
+            idx = len(prefix)
+            return ground_truth[idx] if idx < len(ground_truth) else 0
+
+        def verifier(prompt, drafts):
+            return verify_candidates(target_predict, prompt, drafts)
+
+        # 1. Speculative mode (draft_k=2)
+        decoder = SpeculativeDecoder(draft_k=2)
+        # Prompt: [10, 20, 30, 40, 10, 20] -> prompt-lookup will draft [30, 40]!
+        prompt = [10, 20, 30, 40, 10, 20]
+        generated = decoder.generate(prompt, verifier, max_new_tokens=4)
+        self.assertEqual(generated, [30, 40, 10, 20])
+        self.assertGreater(decoder.stats.accepted_draft_tokens, 0)
+        self.assertGreater(decoder.stats.acceptance_rate, 0.0)
+
+        # 2. Disabled speculative mode (draft_k=0) -> 100% autoregressive fallback
+        baseline_decoder = SpeculativeDecoder(draft_k=0)
+        gen_base = baseline_decoder.generate(prompt, verifier, max_new_tokens=4)
+        self.assertEqual(gen_base, [30, 40, 10, 20])
+        self.assertEqual(baseline_decoder.stats.total_draft_tokens, 0)
+        self.assertEqual(baseline_decoder.stats.accepted_draft_tokens, 0)
+        self.assertEqual(baseline_decoder.stats.tokens_per_forward, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
