@@ -348,7 +348,7 @@ class MemoryBalancer:
                     "COLI_VULKAN": "1",
                     "COLI_VK_DENSE": "1",
                     "COLI_NO_OMP_TUNE": "1",
-                    "--ram": f"{ram_alloc:.1f}",
+                    "--ram": str(max(1, int(round(ram_alloc)))),
                 }
                 return BalancedPlacementPlan(
                     model_name=geometry.name,
@@ -396,7 +396,7 @@ class MemoryBalancer:
                 disk_layers=disk_layers,
                 device_mode="cpu_exclusive",
                 max_memory_map={"cpu": f"{ram_safe_gb:.2f}GiB"},
-                colibri_cli_args={"--ram": f"{ram_alloc:.1f}", "--gpu": "none"},
+                colibri_cli_args={"--ram": str(max(1, int(round(ram_alloc)))), "--gpu": "none"},
                 host_ram_pressure_relieved_pct=0.0,
                 estimated_speedup_vs_cpu=1.0,
                 status_summary=f"Running 100% on CPU AVX2/OpenMP (RAM: {ram_alloc:.1f} GB, Safe: {ram_safe_gb:.1f} GB)",
@@ -486,7 +486,7 @@ class MemoryBalancer:
             }
 
             colibri_args = {
-                "--ram": f"{ram_alloc_gb:.1f}",
+                "--ram": str(max(1, int(round(ram_alloc_gb)))),
                 "--vram": f"{vram_alloc_gb:.1f}",
                 "--gpu": "0",
                 "CUDA_DENSE": "1" if vram_dense_bytes > 0 else "0",
@@ -565,7 +565,7 @@ class MemoryBalancer:
         }
 
         colibri_args = {
-            "--ram": f"{ram_alloc_gb:.1f}",
+            "--ram": str(max(1, int(round(ram_alloc_gb)))),
             "--vram": f"{vram_alloc_gb:.1f}",
             "--gpu": "0",
             "CUDA_DENSE": "1",
