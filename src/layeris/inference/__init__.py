@@ -24,6 +24,14 @@ from layeris.inference.kv_cache import (
     create_kv_cache,
     get_kv_cache_settings,
 )
+from layeris.inference.memory_balancer import (
+    BalancedPlacementPlan,
+    MemoryBalancer,
+    MemoryBreakdown,
+    ModelGeometry,
+    calculate_balanced_memory_plan,
+    resolve_model_geometry,
+)
 
 __all__ = [
     "configure_safe_execution_environment",
@@ -40,4 +48,10 @@ __all__ = [
     "TurboQuantCache",
     "create_kv_cache",
     "get_kv_cache_settings",
+    "BalancedPlacementPlan",
+    "MemoryBalancer",
+    "MemoryBreakdown",
+    "ModelGeometry",
+    "calculate_balanced_memory_plan",
+    "resolve_model_geometry",
 ]

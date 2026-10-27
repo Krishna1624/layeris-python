@@ -13,7 +13,11 @@ if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
 from layeris.inference.guard import detect_hardware_capabilities, get_cpu_info, get_ram_info
-from layeris.inference.speculative import PromptLookupDraftGenerator, SpeculativeStats
+from layeris.inference.speculative import (
+    PromptLookupDraftGenerator,
+    SpeculativeDecoder,
+    SpeculativeStats,
+)
 
 
 class TestInferenceComponents(unittest.TestCase):
@@ -167,6 +171,67 @@ class TestInferenceComponents(unittest.TestCase):
         self.assertEqual(baseline_decoder.stats.accepted_draft_tokens, 0)
         self.assertEqual(baseline_decoder.stats.tokens_per_forward, 1.0)
 
+    def test_speculative_decoder_accepted_tokens(self):
+        decoder = SpeculativeDecoder(draft_k=3)
+        # Suffix [1, 2, 3] matches at index 0, candidates are [4, 5]
+        prompt_tokens = [1, 2, 3, 4, 5, 1, 2, 3]
+
+        def verifier_stub(prefix, drafts):
+            self.assertEqual(drafts, [4, 5, 1])
+            # Target model accepts draft tokens and generates next token 6
+            return [4, 5, 1], 6, False
+
+        new_tokens, is_eos = decoder.step(prompt_tokens, verifier_stub)
+        self.assertEqual(new_tokens, [4, 5, 1, 6])
+        self.assertFalse(is_eos)
+        self.assertEqual(decoder.stats.total_tokens_generated, 4)
+        self.assertEqual(decoder.stats.total_draft_tokens, 3)
+        self.assertEqual(decoder.stats.accepted_draft_tokens, 3)
+        self.assertEqual(decoder.stats.total_forward_passes, 1)
+        self.assertEqual(decoder.stats.acceptance_rate, 1.0)
+
+    def test_speculative_decoder_rejected_fallback(self):
+        decoder = SpeculativeDecoder(draft_k=3)
+        prompt_tokens = [10, 20, 30, 40]  # No repeated n-gram -> drafts is []
+
+        def verifier_stub(prefix, drafts):
+            self.assertEqual(drafts, [])
+            # Target model rejects/has no drafts, emits single autoregressive token 50
+            return [], 50, False
+
+        new_tokens, is_eos = decoder.step(prompt_tokens, verifier_stub)
+        self.assertEqual(new_tokens, [50])
+        self.assertFalse(is_eos)
+        self.assertEqual(decoder.stats.total_tokens_generated, 1)
+        self.assertEqual(decoder.stats.total_draft_tokens, 0)
+        self.assertEqual(decoder.stats.accepted_draft_tokens, 0)
+        self.assertEqual(decoder.stats.total_forward_passes, 1)
+
+    def test_speculative_decoder_eos_handling(self):
+        decoder = SpeculativeDecoder(draft_k=2)
+        prompt_tokens = [100, 200, 100, 200]  # Drafts: [] or whatever
+
+        def verifier_stub(prefix, drafts):
+            # Target model hits end-of-sequence
+            return [], None, True
+
+        new_tokens, is_eos = decoder.step(prompt_tokens, verifier_stub)
+        self.assertEqual(new_tokens, [])
+        self.assertTrue(is_eos)
+
+    def test_prompt_lookup_repeated_patterns_vs_non_reusable(self):
+        gen = PromptLookupDraftGenerator(max_draft_tokens=4, ngram_size=3)
+        # Pattern-heavy code sequence: 'def binary_search(arr, target): ... def binary_search(arr'
+        code_tokens = [101, 202, 303, 404, 505, 606, 707, 101, 202, 303]
+        draft_code = gen.generate_draft(code_tokens)
+        self.assertEqual(draft_code, [404, 505, 606, 707])
+
+        # Non-reusable arbitrary prose sequence without repeated 3-grams
+        prose_tokens = [11, 22, 33, 44, 55, 66, 77, 88, 99]
+        draft_prose = gen.generate_draft(prose_tokens)
+        self.assertEqual(draft_prose, [])
+
 
 if __name__ == "__main__":
     unittest.main()
+

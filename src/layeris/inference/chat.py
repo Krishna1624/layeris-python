@@ -29,6 +29,7 @@ except ImportError:
 
 from layeris.inference.guard import configure_safe_execution_environment
 from layeris.inference.kv_cache import create_kv_cache, get_kv_cache_settings
+from layeris.inference.memory_balancer import calculate_balanced_memory_plan
 
 
 def search_live_web(query: str, timeout: int = 6) -> str:
@@ -84,10 +85,21 @@ class InteractiveChatEngine:
 
         print(f"[*] Initializing model {model_id} on device: {self.device}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+
+        # Balance memory across VRAM and RAM to prevent OOM
+        mem_plan = calculate_balanced_memory_plan(
+            model_id,
+            precision="fp16" if self.device == "cuda" else "fp32",
+            hardware=self.profile,
+        )
+        print(f"[*] {mem_plan.status_summary}")
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
             device_map="auto" if self.device == "cuda" else None,
+            max_memory=mem_plan.max_memory_map if self.device == "cuda" else None,
+            low_cpu_mem_usage=True,
             trust_remote_code=True,
         )
         if self.device == "cpu":
